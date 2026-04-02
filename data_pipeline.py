@@ -151,9 +151,34 @@ def collect_prs(
 
         pulls = repo.get_pulls(state="closed", sort="updated", direction="desc")
 
-        for pr in pulls:
-            if len(raw_samples) >= max_prs:
-                break
+        MAX_PAGE_RETRIES = 5
+        retry_count = 0
+        pr_iter = iter(pulls)
+
+        while len(raw_samples) < max_prs:
+            try:
+                pr = next(pr_iter)
+                retry_count = 0          # successful page fetch — reset counter
+            except StopIteration:
+                break                    # exhausted all PRs for this repo
+            except Exception as exc:
+                # Catches 503 RetryError, connection resets, GithubException, etc.
+                retry_count += 1
+                if retry_count > MAX_PAGE_RETRIES:
+                    print(f"   ✖  {repo_name}: gave up after {MAX_PAGE_RETRIES} retries ({exc})")
+                    break
+                wait = 2 ** retry_count   # 2, 4, 8, 16, 32 s
+                print(f"   ⚠  GitHub error (attempt {retry_count}/{MAX_PAGE_RETRIES}): {exc}")
+                print(f"      Backing off {wait}s before retry …")
+                time.sleep(wait)
+                # Re-fetch the paginated list so the iterator starts fresh
+                try:
+                    pulls = repo.get_pulls(state="closed", sort="updated", direction="desc")
+                    pr_iter = iter(pulls)
+                except Exception:
+                    pass
+                continue
+
             if not pr.merged:
                 continue
             if not _pr_matches_keywords(pr.body or "", pr.title):
