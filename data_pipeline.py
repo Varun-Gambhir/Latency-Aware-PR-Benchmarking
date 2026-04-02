@@ -277,6 +277,28 @@ def _append_raw_pr(record: dict, path: str) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _load_seen(path: str) -> set[tuple[str, int]]:
+    """
+    Read an existing NDJSON checkpoint and return a set of
+    (repo, pr_number) pairs that have already been collected.
+    Returns an empty set if the file does not exist yet.
+    """
+    seen: set[tuple[str, int]] = set()
+    if not os.path.exists(path):
+        return seen
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                seen.add((rec["repo"], rec["pr_number"]))
+            except (json.JSONDecodeError, KeyError):
+                pass   # corrupt line — skip silently
+    return seen
+
+
 def collect_prs(
     tokens: list[str],
     max_prs: int = 200,
@@ -291,11 +313,16 @@ def collect_prs(
     then returns the full list for the cleaning phase.
     """
     pool = TokenPool(tokens)
-    raw_samples: list[dict] = []
 
-    # Truncate/create the file at the start of a fresh run
-    open(raw_output_path, "w").close()
-    print(f"📝  Streaming raw matches → {raw_output_path}")
+    # ── Resume: load already-collected (repo, pr_number) pairs ──────────
+    seen: set[tuple[str, int]] = _load_seen(raw_output_path)
+    raw_samples: list[dict] = []          # holds only NEW records this run
+
+    if seen:
+        print(f"♻️   Resuming — {len(seen)} PR(s) already in {raw_output_path}, skipping them.")
+    else:
+        print(f"🆕  No existing checkpoint found, starting fresh.")
+    print(f"📝  Appending new matches → {raw_output_path}")
 
     for repo_name in HFT_REPOS:
         print(f"\n🔍  Scanning {repo_name} …")
@@ -323,7 +350,7 @@ def collect_prs(
         retry_count = 0
         pr_iter = _fresh_iter()
 
-        while len(raw_samples) < max_prs:
+        while len(seen) + len(raw_samples) < max_prs:
             try:
                 pr = next(pr_iter)
                 retry_count = 0          # successful fetch — reset counter
@@ -353,6 +380,9 @@ def collect_prs(
 
             if not pr.merged:
                 continue
+            # ── Skip already-collected PRs ──────────────────────────────
+            if (repo_name, pr.number) in seen:
+                continue
             if not _pr_matches_keywords(pr.body or "", pr.title):
                 continue
 
@@ -375,10 +405,10 @@ def collect_prs(
             raw_samples.append(record)
             print(f"   ✓  [token {pool._index}] #{pr.number}  {pr.title[:70]}")
 
-        if len(raw_samples) >= max_prs:
+        if len(seen) + len(raw_samples) >= max_prs:
             break
 
-    print(f"\n📦  Collected {len(raw_samples)} raw PR samples.")
+    print(f"\n📦  Added {len(raw_samples)} new PR(s) this run  |  {len(seen) + len(raw_samples)} total in checkpoint.")
     return raw_samples
 
 
