@@ -113,16 +113,33 @@ def _extract_diff(pr) -> str:
     return combined[:4000] if combined else ""
 
 
+def _append_raw_pr(record: dict, path: str) -> None:
+    """
+    Append a single raw-PR record to a newline-delimited JSON file
+    (one JSON object per line).  Creates the file on first write.
+    Safe to call after every match — if the run crashes, already-written
+    records are preserved and can be replayed without re-hitting GitHub.
+    """
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def collect_prs(
     token: str,
     max_prs: int = 200,
+    raw_output_path: str = "raw_prs.ndjson",
 ) -> list[dict]:
     """
     Query each repo for merged PRs that contain HFT keywords.
-    Returns a list of raw dicts ready for the cleaning phase.
+    Appends each match to *raw_output_path* immediately on discovery,
+    then returns the full list for the cleaning phase.
     """
     g = Github(token)
     raw_samples: list[dict] = []
+
+    # Truncate/create the file at the start of a fresh run
+    open(raw_output_path, "w").close()
+    print(f"📝  Streaming raw matches → {raw_output_path}")
 
     for repo_name in HFT_REPOS:
         print(f"\n🔍  Scanning {repo_name} …")
@@ -132,7 +149,6 @@ def collect_prs(
             print(f"   ⚠  Could not access {repo_name}: {exc}")
             continue
 
-        # GitHub search: merged PRs only
         pulls = repo.get_pulls(state="closed", sort="updated", direction="desc")
 
         for pr in pulls:
@@ -147,16 +163,19 @@ def collect_prs(
             if not diff:
                 continue
 
-            raw_samples.append(
-                {
-                    "repo": repo_name,
-                    "pr_number": pr.number,
-                    "raw_title": pr.title,
-                    "raw_body": (pr.body or "")[:2000],
-                    "diff": diff,
-                    "pr_url": pr.html_url,
-                }
-            )
+            record = {
+                "repo": repo_name,
+                "pr_number": pr.number,
+                "raw_title": pr.title,
+                "raw_body": (pr.body or "")[:2000],
+                "diff": diff,
+                "pr_url": pr.html_url,
+            }
+
+            # ── Persist immediately, before anything else ──
+            _append_raw_pr(record, raw_output_path)
+
+            raw_samples.append(record)
             print(f"   ✓  #{pr.number}  {pr.title[:70]}")
 
         if len(raw_samples) >= max_prs:
@@ -258,6 +277,7 @@ def load_benchmark(path: str) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="HFT Benchmark Data Pipeline")
     parser.add_argument("--output", default="hft_benchmark.json", help="Output JSON path")
+    parser.add_argument("--raw_output", default="raw_prs.ndjson", help="Incremental raw-PR append file (NDJSON)")
     parser.add_argument("--max_prs", type=int, default=200, help="Max PRs to collect")
     parser.add_argument(
         "--github_token",
@@ -280,6 +300,7 @@ def main() -> None:
     raw_samples = collect_prs(
         token=args.github_token,
         max_prs=args.max_prs,
+        raw_output_path=args.raw_output,
     )
 
     if not raw_samples:
