@@ -121,28 +121,89 @@ class TokenPool:
 # ──────────────────────────────────────────────
 
 HFT_REPOS: list[str] = [
-    "quickfix/quickfix",
-    "xerial/snappy-java",        # compression relevant to tick data
-    "zeromq/libzmq",             # low-latency messaging
-    "google/flatbuffers",        # zero-copy serialization
-    "chronoxor/CppBenchmark",    # C++ latency benchmarks
-    "martingale-cs/StrategyStudio",  # trading strategy infra
+    # ── Core HFT / trading infra ──────────────────────────────────────────
+    "quickfix/quickfix",             # FIX protocol engine
+    "OnixS/fix-antenna-cpp",         # FIX engine, latency-focused
+    "aeron-io/aeron",                # ultra-low-latency messaging
+    "real-logic/aeron",              # same project, main mirror
+    "real-logic/SBE",                # Simple Binary Encoding (FIX SBE)
+
+    # ── Lock-free / concurrent data structures ────────────────────────────
+    "cameron314/concurrentqueue",    # lock-free MPMC queue
+    "cameron314/readerwriterqueue",  # lock-free SPSC queue
+    "rigtorp/SPSCQueue",             # SPSC ring buffer
+    "rigtorp/MPMCQueue",             # MPMC ring buffer
+    "rigtorp/Seqlock",               # seqlock implementation
+    "rigtorp/HashMap",               # low-latency hash map
+    "facebook/folly",                # includes lock-free structures
+    "abseil/abseil-cpp",             # Swiss tables, low-latency utils
+    "efficient/libcds",              # Concurrent Data Structures library
+    "khizmax/libcds",                # same lib, main repo
+    "mpoeter/xenium",                # lock-free data structures research
+
+    # ── Low-latency messaging / networking ────────────────────────────────
+    "zeromq/libzmq",                 # ZeroMQ C++ core
+    "nanomsg/nng",                   # nanomsg-next-gen
+    "chronoxor/CppServer",           # async C++ networking
+    "MengRao/WFMPMC",                # wait-free MPMC queue
+
+    # ── Serialisation (zero-copy / SIMD) ─────────────────────────────────
+    "google/flatbuffers",            # zero-copy serialisation
+    "EsotericSoftware/flatbuffers",  # flatbuffers fork
+    "fmtlib/fmt",                    # fast format library
+    "simdjson/simdjson",             # SIMD JSON parser
+    "lemire/simdjson",               # same project
+    "nicowillis/fast_float",         # SIMD float parsing
+    "fastfloat/fast_float",          # fast float parsing
+
+    # ── Memory / allocators ───────────────────────────────────────────────
+    "microsoft/mimalloc",            # fast allocator
+    "jemalloc/jemalloc",             # jemalloc
+    "gperftools/gperftools",         # tcmalloc + profiler
+
+    # ── Benchmarking / profiling ──────────────────────────────────────────
+    "chronoxor/CppBenchmark",        # latency benchmark harness
+    "google/benchmark",              # Google microbenchmark
+    "DigitalInBlue/Celero",          # C++ benchmark framework
+    "martinus/nanobench",            # fast microbenchmark
+
+    # ── SIMD / numeric ────────────────────────────────────────────────────
+    "xtensor-stack/xsimd",           # SIMD wrappers
+    "VcDevel/Vc",                    # portable SIMD
+    "highway/highway",               # Google Highway SIMD
+    "google/highway",
+
+    # ── Atomics / memory model ────────────────────────────────────────────
+    "crossbeam-rs/crossbeam",        # lock-free in Rust (good C++ diffs too)
+    "boostorg/atomic",               # Boost.Atomic
+    "boostorg/lockfree",             # Boost.Lockfree
+
+    # ── Time / clock ─────────────────────────────────────────────────────
+    "google/cctz",                   # fast time-zone handling
+    "HowardHinnant/date",            # C++ date/time library
 ]
 
 HFT_KEYWORDS: list[str] = [
-    "lock-free",
-    "lock free",
-    "latency",
-    "SPSC",
-    "SIMD",
-    "atomic",
-    "memory_order",
-    "wait-free",
-    "cache line",
-    "cacheline",
-    "zero-copy",
-    "busy-spin",
-    "high frequency",
+    # Concurrency primitives
+    "lock-free", "lock free", "lockfree",
+    "wait-free", "wait free",
+    "SPSC", "MPMC", "MPSC", "SPMC",
+    "atomic", "memory_order", "compare_exchange", "fetch_add",
+    "CAS", "ABA",
+    # Latency / performance
+    "latency", "throughput", "nanosecond", "tick-to-trade",
+    "busy-spin", "busy spin", "spin-wait",
+    "high frequency", "HFT", "ultra-low",
+    # Memory / cache
+    "cache line", "cacheline", "false sharing",
+    "alignas", "memory pool", "arena allocat",
+    "prefetch", "NUMA",
+    # SIMD / vectorisation
+    "SIMD", "AVX", "SSE", "intrinsic", "vectori",
+    # Serialisation
+    "zero-copy", "zero copy", "flatbuffer", "SBE",
+    # Networking
+    "kernel bypass", "RDMA", "DPDK", "busy poll",
 ]
 
 CLEANER_SYSTEM_PROMPT = """You are a senior C++ HFT engineer. 
@@ -328,7 +389,7 @@ def collect_prs(
 def _init_gemini(api_key: str) -> genai.GenerativeModel:
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-2.0-flash",
         system_instruction=CLEANER_SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=200),
     )
