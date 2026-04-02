@@ -24,6 +24,98 @@ from tqdm import tqdm
 
 load_dotenv()
 
+
+# ──────────────────────────────────────────────
+# Multi-token pool
+# ──────────────────────────────────────────────
+
+class TokenPool:
+    """
+    Round-robin GitHub token manager.
+
+    Rotation strategy:
+      - Every successful API call advances to the next token (even spread).
+      - On a rate-limit / 503, the current token is marked exhausted and the
+        next one is tried immediately — no sleep yet.
+      - Only when ALL tokens are exhausted does the pool back off
+        (exponential, capped at 5 min) then reset all tokens.
+
+    Usage:
+        pool = TokenPool(["ghp_aaa", "ghp_bbb"])
+        g    = pool.github_client()   # Github() for current token
+        pool.rotate()                 # advance after a successful fetch
+        pool.mark_exhausted(exc)      # flag current token, switch immediately
+    """
+
+    def __init__(self, tokens: list[str]) -> None:
+        if not tokens:
+            raise ValueError("TokenPool requires at least one GitHub token.")
+        self._tokens: list[str] = tokens
+        self._exhausted: list[bool] = [False] * len(tokens)
+        self._index: int = 0
+        self._backoff_step: int = 0
+        self._clients: dict[int, object] = {}
+
+    # ── public interface ─────────────────────
+
+    @property
+    def current_token(self) -> str:
+        return self._tokens[self._index]
+
+    def github_client(self):
+        """Return (cached) Github client for the current token."""
+        if self._index not in self._clients:
+            self._clients[self._index] = Github(self._tokens[self._index])
+        return self._clients[self._index]
+
+    def rotate(self) -> None:
+        """Advance to the next token (called after every successful fetch)."""
+        self._index = (self._index + 1) % len(self._tokens)
+
+    def mark_exhausted(self, exc: Optional[Exception] = None) -> None:
+        """
+        Flag the current token as rate-limited and switch to the next
+        available one immediately.  If all are exhausted, sleep + reset.
+        """
+        label = f"token[{self._index}] ...{self.current_token[-6:]}"
+        print(f"   🔴  {label} exhausted ({exc or 'rate-limited'})")
+        self._exhausted[self._index] = True
+
+        next_idx = self._next_available()
+        if next_idx is not None:
+            self._index = next_idx
+            print(f"   🔄  Switched to token[{self._index}] ...{self.current_token[-6:]}")
+        else:
+            self._full_pool_backoff()
+
+    @staticmethod
+    def is_rate_limit_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(k in msg for k in ("503", "429", "403", "rate limit", "retry", "max retries"))
+
+    # ── private helpers ──────────────────────
+
+    def _next_available(self) -> Optional[int]:
+        for offset in range(1, len(self._tokens) + 1):
+            idx = (self._index + offset) % len(self._tokens)
+            if not self._exhausted[idx]:
+                return idx
+        return None
+
+    def _full_pool_backoff(self) -> None:
+        self._backoff_step += 1
+        wait = min(30 * (2 ** (self._backoff_step - 1)), 300)  # 30 60 120 240 300s
+        print(
+            f"\n   ⏳  All {len(self._tokens)} token(s) exhausted. "
+            f"Backing off {wait}s (round {self._backoff_step}) ...\n"
+        )
+        time.sleep(wait)
+        self._exhausted = [False] * len(self._tokens)
+        self._backoff_step = 0
+        self._index = 0
+        print("   ✅  Token pool reset — resuming.")
+
+
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
@@ -125,16 +217,19 @@ def _append_raw_pr(record: dict, path: str) -> None:
 
 
 def collect_prs(
-    token: str,
+    tokens: list[str],
     max_prs: int = 200,
     raw_output_path: str = "raw_prs.ndjson",
 ) -> list[dict]:
     """
     Query each repo for merged PRs that contain HFT keywords.
+
+    tokens: one or more GitHub PATs — rotates between them on rate-limit,
+            backs off only when the entire pool is exhausted simultaneously.
     Appends each match to *raw_output_path* immediately on discovery,
     then returns the full list for the cleaning phase.
     """
-    g = Github(token)
+    pool = TokenPool(tokens)
     raw_samples: list[dict] = []
 
     # Truncate/create the file at the start of a fresh run
@@ -143,38 +238,54 @@ def collect_prs(
 
     for repo_name in HFT_REPOS:
         print(f"\n🔍  Scanning {repo_name} …")
-        try:
-            repo = g.get_repo(repo_name)
-        except GithubException as exc:
-            print(f"   ⚠  Could not access {repo_name}: {exc}")
+
+        # ── Get repo object, rotating token on failure ───────────────
+        repo = None
+        for _ in range(len(pool._tokens) + 1):
+            try:
+                repo = pool.github_client().get_repo(repo_name)
+                break
+            except GithubException as exc:
+                if TokenPool.is_rate_limit_error(exc):
+                    pool.mark_exhausted(exc)
+                else:
+                    print(f"   ⚠  Could not access {repo_name}: {exc}")
+                    break
+        if repo is None:
             continue
 
-        pulls = repo.get_pulls(state="closed", sort="updated", direction="desc")
+        def _fresh_iter():
+            return iter(pool.github_client().get_repo(repo_name)
+                        .get_pulls(state="closed", sort="updated", direction="desc"))
 
         MAX_PAGE_RETRIES = 5
         retry_count = 0
-        pr_iter = iter(pulls)
+        pr_iter = _fresh_iter()
 
         while len(raw_samples) < max_prs:
             try:
                 pr = next(pr_iter)
-                retry_count = 0          # successful page fetch — reset counter
+                retry_count = 0          # successful fetch — reset counter
+                pool.rotate()            # spread load across tokens evenly
             except StopIteration:
-                break                    # exhausted all PRs for this repo
+                break                    # no more PRs in this repo
             except Exception as exc:
-                # Catches 503 RetryError, connection resets, GithubException, etc.
-                retry_count += 1
-                if retry_count > MAX_PAGE_RETRIES:
-                    print(f"   ✖  {repo_name}: gave up after {MAX_PAGE_RETRIES} retries ({exc})")
-                    break
-                wait = 2 ** retry_count   # 2, 4, 8, 16, 32 s
-                print(f"   ⚠  GitHub error (attempt {retry_count}/{MAX_PAGE_RETRIES}): {exc}")
-                print(f"      Backing off {wait}s before retry …")
-                time.sleep(wait)
-                # Re-fetch the paginated list so the iterator starts fresh
+                if TokenPool.is_rate_limit_error(exc):
+                    # Switch token immediately; only sleep if pool is exhausted
+                    pool.mark_exhausted(exc)
+                else:
+                    # Transient non-rate-limit error: simple backoff
+                    retry_count += 1
+                    if retry_count > MAX_PAGE_RETRIES:
+                        print(f"   ✖  {repo_name}: gave up after {MAX_PAGE_RETRIES} retries ({exc})")
+                        break
+                    wait = 2 ** retry_count
+                    print(f"   ⚠  GitHub error (attempt {retry_count}/{MAX_PAGE_RETRIES}): {exc}")
+                    print(f"      Backing off {wait}s …")
+                    time.sleep(wait)
+                # Either way, rebuild iterator with current (possibly new) token
                 try:
-                    pulls = repo.get_pulls(state="closed", sort="updated", direction="desc")
-                    pr_iter = iter(pulls)
+                    pr_iter = _fresh_iter()
                 except Exception:
                     pass
                 continue
@@ -201,7 +312,7 @@ def collect_prs(
             _append_raw_pr(record, raw_output_path)
 
             raw_samples.append(record)
-            print(f"   ✓  #{pr.number}  {pr.title[:70]}")
+            print(f"   ✓  [token {pool._index}] #{pr.number}  {pr.title[:70]}")
 
         if len(raw_samples) >= max_prs:
             break
@@ -305,9 +416,14 @@ def main() -> None:
     parser.add_argument("--raw_output", default="raw_prs.ndjson", help="Incremental raw-PR append file (NDJSON)")
     parser.add_argument("--max_prs", type=int, default=200, help="Max PRs to collect")
     parser.add_argument(
-        "--github_token",
-        default=os.getenv("GITHUB_TOKEN"),
-        help="GitHub personal access token (or set GITHUB_TOKEN env var)",
+        "--github_tokens",
+        nargs="+",
+        default=[t.strip() for t in os.getenv("GITHUB_TOKENS", os.getenv("GITHUB_TOKEN", "")).split(",") if t.strip()],
+        help=(
+            "One or more GitHub PATs. Pass as space-separated args: "
+            "--github_tokens ghp_aaa ghp_bbb  "
+            "Or set GITHUB_TOKENS=ghp_aaa,ghp_bbb in .env"
+        ),
     )
     parser.add_argument(
         "--gemini_api_key",
@@ -316,14 +432,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.github_token:
-        raise ValueError("GitHub token is required. Set GITHUB_TOKEN or pass --github_token.")
+    if not args.github_tokens:
+        raise ValueError("At least one GitHub token is required. Set GITHUB_TOKENS or pass --github_tokens.")
     if not args.gemini_api_key:
         raise ValueError("Gemini API key is required. Set GEMINI_API_KEY or pass --gemini_api_key.")
 
     # Phase 1 ──────────────────────────────────
+    print(f"🔑  Using {len(args.github_tokens)} GitHub token(s).")
     raw_samples = collect_prs(
-        token=args.github_token,
+        tokens=args.github_tokens,
         max_prs=args.max_prs,
         raw_output_path=args.raw_output,
     )
