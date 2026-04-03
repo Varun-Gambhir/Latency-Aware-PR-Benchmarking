@@ -24,6 +24,7 @@ from typing import Optional
 
 import httpx
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from openai import OpenAI               # used for NVIDIA NIM (OpenAI-compatible API)
 from dotenv import load_dotenv
 
@@ -41,7 +42,7 @@ NIM_MODELS: dict[str, str] = {
     "mixtral-8x7b": "mistralai/mixtral-8x7b-instruct-v0.1",
 }
 
-GEMINI_CODE_MODEL = "gemini-3-flash-preview"
+GEMINI_CODE_MODEL = "gemini-2.5-flash-preview-04-17"
 
 MAX_REACT_ITERATIONS = 3
 
@@ -87,6 +88,16 @@ Respond with exactly one line:
 # Low-level API wrappers
 # ──────────────────────────────────────────────
 
+# Turn off all safety filters — HFT C++ code (atomics, memory ops) routinely
+# triggers Gemini's heuristics even though it is entirely benign.
+_GEMINI_SAFETY_OFF = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+
 def _call_gemini(
     system: str,
     user_message: str,
@@ -106,12 +117,28 @@ def _call_gemini(
     )
     for attempt in range(3):
         try:
-            response = model.generate_content(user_message)
-            return response.text.strip()
+            response = model.generate_content(
+                user_message,
+                safety_settings=_GEMINI_SAFETY_OFF,
+            )
+            # Check finish reason before accessing .text — a blocked response
+            # has no candidates/parts and .text raises instead of returning "".
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is None:
+                print(f"   ⚠  Gemini returned no candidates (attempt {attempt + 1}/3)")
+                time.sleep(2 ** attempt)
+                continue
+            finish = str(candidate.finish_reason)
+            if finish not in ("FinishReason.STOP", "1", "STOP"):
+                print(f"   ⚠  Gemini blocked — finish_reason={finish}  "
+                      f"safety={candidate.safety_ratings} (attempt {attempt + 1}/3)")
+                time.sleep(2 ** attempt)
+                continue
+            return candidate.content.parts[0].text.strip()
         except Exception as exc:
             print(f"   ⚠  Gemini call failed (attempt {attempt + 1}/3): {exc}")
             time.sleep(2 ** attempt)
-    return ""   # empty string scores 0 but caller can detect it
+    return ""
 
 
 def _call_nim(

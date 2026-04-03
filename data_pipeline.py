@@ -18,11 +18,19 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from github import Github, GithubException
 from dotenv import load_dotenv
 from tqdm import tqdm
 
 load_dotenv()
+
+_GEMINI_SAFETY_OFF = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
 
 
 # ──────────────────────────────────────────────
@@ -488,7 +496,7 @@ def collect_prs(
 def _init_gemini(api_key: str) -> genai.GenerativeModel:
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
+        model_name="gemini-2.0-flash",
         system_instruction=CLEANER_SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=200),
     )
@@ -508,9 +516,17 @@ def clean_prompt_with_llm(
 
     for attempt in range(retries):
         try:
-            response = model.generate_content(user_msg)
-            cleaned = response.text.strip()
-            # Basic sanity check: non-empty and shorter than input
+            response = model.generate_content(user_msg, safety_settings=_GEMINI_SAFETY_OFF)
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is None:
+                time.sleep(2 ** attempt)
+                continue
+            finish = str(candidate.finish_reason)
+            if finish not in ("FinishReason.STOP", "1", "STOP"):
+                print(f"   ⚠  Gemini blocked (attempt {attempt + 1}): finish_reason={finish}")
+                time.sleep(2 ** attempt)
+                continue
+            cleaned = candidate.content.parts[0].text.strip()
             if cleaned and len(cleaned) < len(raw_body) + 50:
                 return cleaned
         except Exception as exc:
