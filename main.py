@@ -124,32 +124,32 @@ def run_agentic(
 ) -> list[dict]:
     """
     Evaluate every sample through the ReAct multi-agent pipeline.
-    Uses the Gemini model for all agents (cheapest powerful option).
+    Runs for every model in ZERO_SHOT_MODELS.
     Returns a flat list of metric row dicts.
     """
     rows: list[dict] = []
-    model = "gemini"   # agent model; change if preferred
 
-    print(f"\n{'='*60}")
-    print(f"  Agentic ReAct: {model}  (max 3 iterations / prompt)")
-    print(f"{'='*60}")
+    for model in ZERO_SHOT_MODELS:
+        print(f"\n{'='*60}")
+        print(f"  Agentic ReAct: {model}  (max {n_attempts} iterations / prompt)")
+        print(f"{'='*60}")
 
-    for sample in tqdm(samples, desc="agentic", unit="prompt"):
-        gens = _safe_generate(
-            agentic_generate,
-            prompt=sample["clean_prompt"],
-            model_name=model,
-            n_attempts=n_attempts,
-            api_keys=api_keys,
-        )
-        if not gens:
-            print(f"   ⚠  Skipping {sample['id']} (generation failed).")
-            continue
+        for sample in tqdm(samples, desc=f"agentic-{model}", unit="prompt"):
+            gens = _safe_generate(
+                agentic_generate,
+                prompt=sample["clean_prompt"],
+                model_name=model,
+                n_attempts=n_attempts,
+                api_keys=api_keys,
+            )
+            if not gens:
+                print(f"   ⚠  Skipping {sample['id']} (generation failed).")
+                continue
 
-        metrics = evaluate_sample(gens, sample["reference_code"])
-        rows.append(
-            _metrics_row(sample["id"], model, "agentic_react", metrics)
-        )
+            metrics = evaluate_sample(gens, sample["reference_code"])
+            rows.append(
+                _metrics_row(sample["id"], model, "agentic_react", metrics)
+            )
 
     return rows
 

@@ -123,7 +123,7 @@ def _call_gemini(
             )
             # Check finish reason before accessing .text — a blocked response
             # has no candidates/parts and .text raises instead of returning "".
-            candidate = response.candidates[0] if response.candidates else None
+            candidate = response.candidates[0] if getattr(response, "candidates", None) and len(response.candidates) > 0 else None
             if candidate is None:
                 print(f"   ⚠  Gemini returned no candidates (attempt {attempt + 1}/3)")
                 time.sleep(2 ** attempt)
