@@ -41,7 +41,7 @@ NIM_MODELS: dict[str, str] = {
     "mixtral-8x7b": "mistralai/mixtral-8x7b-instruct-v0.1",
 }
 
-GEMINI_CODE_MODEL = "gemini-1.5-pro"
+GEMINI_CODE_MODEL = "gemini-2.5-flash-preview-04-17"
 
 MAX_REACT_ITERATIONS = 3
 
@@ -104,11 +104,14 @@ def _call_gemini(
             max_output_tokens=max_tokens,
         ),
     )
-    try:
-        response = model.generate_content(user_message)
-        return response.text.strip()
-    except Exception as exc:
-        return f"// ERROR: Gemini call failed – {exc}"
+    for attempt in range(3):
+        try:
+            response = model.generate_content(user_message)
+            return response.text.strip()
+        except Exception as exc:
+            print(f"   ⚠  Gemini call failed (attempt {attempt + 1}/3): {exc}")
+            time.sleep(2 ** attempt)
+    return ""   # empty string scores 0 but caller can detect it
 
 
 def _call_nim(
