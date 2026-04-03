@@ -316,7 +316,7 @@ class ExecutorAgent:
                 EXECUTOR_SYSTEM, code,
                 api_key=self.api_keys.get("gemini"),
                 temperature=0.0,
-                max_tokens=64,
+                max_tokens=512,
             )
         else:
             verdict = _call_nim(
