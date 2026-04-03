@@ -583,14 +583,23 @@ def refine_dataset(
 
     for raw in tqdm(pending, unit="PR"):
         clean = clean_prompt_with_llm(model, raw["raw_title"], raw["raw_body"])
+        # Support both old checkpoint format ("diff" key) and new ("reference_code")
+        if "reference_code" in raw:
+            reference_code = raw["reference_code"]
+            raw_diff       = raw.get("raw_diff", "")
+        else:
+            # Legacy record: "diff" is a raw unified diff — extract added lines now
+            raw_diff       = raw.get("diff", "")
+            reference_code = _diff_to_reference_code(raw_diff) if raw_diff else ""
+
         sample = BenchmarkSample(
             id=f"HFT-{next_idx:04d}",
             repo=raw["repo"],
             pr_number=raw["pr_number"],
             raw_title=raw["raw_title"],
             clean_prompt=clean,
-            reference_code=raw["reference_code"],
-            raw_diff=raw.get("raw_diff", ""),
+            reference_code=reference_code,
+            raw_diff=raw_diff,
             pr_url=raw["pr_url"],
         )
         # ── Write immediately — crash-safe ──────────────────────────────
