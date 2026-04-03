@@ -42,7 +42,7 @@ NIM_MODELS: dict[str, str] = {
     "mixtral-8x7b": "mistralai/mixtral-8x7b-instruct-v0.1",
 }
 
-GEMINI_CODE_MODEL = "gemini-2.5-flash-preview-04-17"
+GEMINI_CODE_MODEL = "gemini-3.1-flash-preview-04-17"
 
 MAX_REACT_ITERATIONS = 3
 
