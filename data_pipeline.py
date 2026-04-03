@@ -50,8 +50,9 @@ class TokenPool:
     def __init__(self, tokens: list[str]) -> None:
         if not tokens:
             raise ValueError("TokenPool requires at least one GitHub token.")
-        self._tokens: list[str] = tokens
-        self._exhausted: list[bool] = [False] * len(tokens)
+        self._tokens: list[str] = list(tokens)
+        self._exhausted: list[bool] = [False] * len(self._tokens)
+        self._dead: list[bool] = [False] * len(self._tokens)   # permanent, never reset
         self._index: int = 0
         self._backoff_step: int = 0
         self._clients: dict[int, object] = {}
@@ -62,6 +63,11 @@ class TokenPool:
     def current_token(self) -> str:
         return self._tokens[self._index]
 
+    @property
+    def active_count(self) -> int:
+        """Number of tokens not permanently dead."""
+        return sum(1 for d in self._dead if not d)
+
     def github_client(self):
         """Return (cached) Github client for the current token."""
         if self._index not in self._clients:
@@ -69,16 +75,20 @@ class TokenPool:
         return self._clients[self._index]
 
     def rotate(self) -> None:
-        """Advance to the next token (called after every successful fetch)."""
-        self._index = (self._index + 1) % len(self._tokens)
+        """Advance to the next live token (called after every successful fetch)."""
+        for offset in range(1, len(self._tokens) + 1):
+            nxt = (self._index + offset) % len(self._tokens)
+            if not self._dead[nxt]:
+                self._index = nxt
+                return
 
     def mark_exhausted(self, exc: Optional[Exception] = None) -> None:
         """
-        Flag the current token as rate-limited and switch to the next
-        available one immediately.  If all are exhausted, sleep + reset.
+        Rate-limited: flag current token temporarily exhausted, switch immediately.
+        All temporarily-exhausted tokens are reset after the backoff sleep.
         """
         label = f"token[{self._index}] ...{self.current_token[-6:]}"
-        print(f"   🔴  {label} exhausted ({exc or 'rate-limited'})")
+        print(f"   🔴  {label} rate-limited ({exc or 'exhausted'})")
         self._exhausted[self._index] = True
 
         next_idx = self._next_available()
@@ -88,6 +98,33 @@ class TokenPool:
         else:
             self._full_pool_backoff()
 
+    def mark_dead(self, exc: Optional[Exception] = None) -> None:
+        """
+        Bad credential / 401: permanently remove this token from the pool.
+        Unlike mark_exhausted, this is NEVER undone by backoff reset.
+        Raises RuntimeError if no live tokens remain.
+        """
+        label = f"token[{self._index}] ...{self.current_token[-6:]}"
+        print(f"   💀  {label} permanently removed — bad credentials ({exc})")
+        self._dead[self._index] = True
+        self._exhausted[self._index] = True   # also block it from backoff reset
+
+        if self.active_count == 0:
+            raise RuntimeError(
+                "All GitHub tokens are invalid (401). "
+                "Please check your tokens and try again."
+            )
+
+        next_idx = self._next_available()
+        if next_idx is not None:
+            self._index = next_idx
+            print(f"   🔄  Switched to token[{self._index}] ...{self.current_token[-6:]}")
+
+    @staticmethod
+    def is_bad_credentials(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "401" in msg or "bad credentials" in msg
+
     @staticmethod
     def is_rate_limit_error(exc: Exception) -> bool:
         msg = str(exc).lower()
@@ -96,24 +133,31 @@ class TokenPool:
     # ── private helpers ──────────────────────
 
     def _next_available(self) -> Optional[int]:
+        """Next token that is neither dead nor temporarily exhausted."""
         for offset in range(1, len(self._tokens) + 1):
             idx = (self._index + offset) % len(self._tokens)
-            if not self._exhausted[idx]:
+            if not self._exhausted[idx] and not self._dead[idx]:
                 return idx
         return None
 
     def _full_pool_backoff(self) -> None:
         self._backoff_step += 1
         wait = min(30 * (2 ** (self._backoff_step - 1)), 300)  # 30 60 120 240 300s
+        alive = self.active_count
         print(
-            f"\n   ⏳  All {len(self._tokens)} token(s) exhausted. "
+            f"\n   ⏳  All {alive} remaining token(s) temporarily exhausted. "
             f"Backing off {wait}s (round {self._backoff_step}) ...\n"
         )
         time.sleep(wait)
-        self._exhausted = [False] * len(self._tokens)
+        # Reset only non-dead tokens
+        self._exhausted = [d for d in self._dead]   # dead stay exhausted; others freed
         self._backoff_step = 0
-        self._index = 0
-        print("   ✅  Token pool reset — resuming.")
+        # Move index to first live token
+        for i in range(len(self._tokens)):
+            if not self._dead[i]:
+                self._index = i
+                break
+        print(f"   ✅  Token pool reset — {alive} token(s) resuming.")
 
 
 # ──────────────────────────────────────────────
@@ -334,8 +378,10 @@ def collect_prs(
                 repo = pool.github_client().get_repo(repo_name)
                 break
             except GithubException as exc:
-                if TokenPool.is_rate_limit_error(exc):
-                    pool.mark_exhausted(exc)
+                if TokenPool.is_bad_credentials(exc):
+                    pool.mark_dead(exc)          # permanent — remove token
+                elif TokenPool.is_rate_limit_error(exc):
+                    pool.mark_exhausted(exc)     # temporary — rotate & retry
                 else:
                     print(f"   ⚠  Could not access {repo_name}: {exc}")
                     break
@@ -358,9 +404,10 @@ def collect_prs(
             except StopIteration:
                 break                    # no more PRs in this repo
             except Exception as exc:
-                if TokenPool.is_rate_limit_error(exc):
-                    # Switch token immediately; only sleep if pool is exhausted
-                    pool.mark_exhausted(exc)
+                if TokenPool.is_bad_credentials(exc):
+                    pool.mark_dead(exc)          # permanent — remove token, no retry
+                elif TokenPool.is_rate_limit_error(exc):
+                    pool.mark_exhausted(exc)     # temporary — rotate & back off
                 else:
                     # Transient non-rate-limit error: simple backoff
                     retry_count += 1
