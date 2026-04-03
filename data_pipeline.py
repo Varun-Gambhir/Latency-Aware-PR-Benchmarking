@@ -499,21 +499,70 @@ def clean_prompt_with_llm(
     return raw_title
 
 
+def _load_cleaned(path: str) -> tuple[list[BenchmarkSample], set[tuple[str, int]]]:
+    """
+    Load already-cleaned samples from an NDJSON checkpoint.
+    Returns (list_of_samples, set_of_(repo, pr_number)_already_done).
+    """
+    samples: list[BenchmarkSample] = []
+    done: set[tuple[str, int]] = set()
+    if not os.path.exists(path):
+        return samples, done
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                samples.append(BenchmarkSample(**rec))
+                done.add((rec["repo"], rec["pr_number"]))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass   # corrupt line — skip
+    return samples, done
+
+
+def _append_cleaned(sample: BenchmarkSample, path: str) -> None:
+    """Write one cleaned sample to the NDJSON checkpoint immediately."""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(asdict(sample), ensure_ascii=False) + "\n")
+
+
 def refine_dataset(
     raw_samples: list[dict],
     gemini_api_key: str,
+    cleaned_checkpoint: str = "cleaned_prs.ndjson",
 ) -> list[BenchmarkSample]:
     """
-    Phase 2: iterate over raw samples, clean each prompt, assemble BenchmarkSample.
-    """
-    model = _init_gemini(gemini_api_key)
-    refined: list[BenchmarkSample] = []
+    Phase 2: clean each raw prompt via Gemini and write to *cleaned_checkpoint*
+    immediately after each call — crash-safe.
 
-    print("\n🧹  Cleaning prompts with Gemini …")
-    for idx, raw in enumerate(tqdm(raw_samples, unit="PR")):
+    On resume, already-cleaned (repo, pr_number) pairs are skipped so no
+    Gemini call is wasted and progress is never lost.
+    """
+    # Load whatever was already cleaned in a previous run
+    already_cleaned, done_set = _load_cleaned(cleaned_checkpoint)
+    if already_cleaned:
+        print(f"\n♻️   Resuming Phase 2 — {len(already_cleaned)} PR(s) already cleaned, skipping them.")
+
+    # Filter to only the PRs that still need cleaning
+    pending = [r for r in raw_samples if (r["repo"], r["pr_number"]) not in done_set]
+
+    if not pending:
+        print("✅  All raw PRs already cleaned — nothing to do.")
+        return already_cleaned
+
+    model = _init_gemini(gemini_api_key)
+
+    print(f"\n🧹  Cleaning {len(pending)} prompt(s) with Gemini …  ({len(already_cleaned)} already done)")
+
+    # Use a global counter so IDs are stable across resumed runs
+    next_idx = len(already_cleaned)
+
+    for raw in tqdm(pending, unit="PR"):
         clean = clean_prompt_with_llm(model, raw["raw_title"], raw["raw_body"])
         sample = BenchmarkSample(
-            id=f"HFT-{idx:04d}",
+            id=f"HFT-{next_idx:04d}",
             repo=raw["repo"],
             pr_number=raw["pr_number"],
             raw_title=raw["raw_title"],
@@ -521,11 +570,13 @@ def refine_dataset(
             reference_code=raw["diff"],
             pr_url=raw["pr_url"],
         )
-        refined.append(sample)
-        # Polite rate-limit: ~30 req/min on free tier
-        time.sleep(0.5)
+        # ── Write immediately — crash-safe ──────────────────────────────
+        _append_cleaned(sample, cleaned_checkpoint)
+        already_cleaned.append(sample)
+        next_idx += 1
+        time.sleep(0.5)   # ~30 req/min on free tier
 
-    return refined
+    return already_cleaned
 
 
 # ──────────────────────────────────────────────
@@ -550,8 +601,9 @@ def load_benchmark(path: str) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="HFT Benchmark Data Pipeline")
-    parser.add_argument("--output", default="hft_benchmark.json", help="Output JSON path")
-    parser.add_argument("--raw_output", default="raw_prs.ndjson", help="Incremental raw-PR append file (NDJSON)")
+    parser.add_argument("--output", default="hft_benchmark.json", help="Final benchmark JSON path")
+    parser.add_argument("--raw_output", default="raw_prs.ndjson", help="Phase 1 checkpoint — raw PRs (NDJSON)")
+    parser.add_argument("--cleaned_output", default="cleaned_prs.ndjson", help="Phase 2 checkpoint — cleaned PRs (NDJSON)")
     parser.add_argument("--max_prs", type=int, default=200, help="Max PRs to collect")
     parser.add_argument(
         "--github_tokens",
@@ -577,20 +629,37 @@ def main() -> None:
 
     # Phase 1 ──────────────────────────────────
     print(f"🔑  Using {len(args.github_tokens)} GitHub token(s).")
-    raw_samples = collect_prs(
+    collect_prs(
         tokens=args.github_tokens,
         max_prs=args.max_prs,
         raw_output_path=args.raw_output,
     )
 
-    if not raw_samples:
-        print("⚠  No matching PRs found. Try expanding HFT_REPOS or HFT_KEYWORDS.")
+    # Load the FULL checkpoint (all runs combined), not just what was found above
+    all_raw: list[dict] = []
+    if os.path.exists(args.raw_output):
+        with open(args.raw_output, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        all_raw.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        print(f"📂  Loaded {len(all_raw)} total raw PR(s) from {args.raw_output}")
+
+    if not all_raw:
+        print("⚠  No raw PRs found. Try expanding HFT_REPOS or HFT_KEYWORDS.")
         return
 
     # Phase 2 ──────────────────────────────────
-    refined = refine_dataset(raw_samples, args.gemini_api_key)
+    refined = refine_dataset(
+        raw_samples=all_raw,
+        gemini_api_key=args.gemini_api_key,
+        cleaned_checkpoint=args.cleaned_output,
+    )
 
-    # Persist ──────────────────────────────────
+    # Persist final JSON ────────────────────────
     save_benchmark(refined, args.output)
 
 
