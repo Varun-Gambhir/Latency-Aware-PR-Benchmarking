@@ -91,10 +91,10 @@ Respond with exactly one line:
 # Turn off all safety filters — HFT C++ code (atomics, memory ops) routinely
 # triggers Gemini's heuristics even though it is entirely benign.
 _GEMINI_SAFETY_OFF = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT:        HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH:       HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT:        genai.types.HarmBlockThreshold.BLOCK_NONE,
+    genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH:       genai.types.HarmBlockThreshold.BLOCK_NONE,
+    genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+    genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
 }
 
 
@@ -129,7 +129,7 @@ def _call_gemini(
                 time.sleep(2 ** attempt)
                 continue
             finish = str(candidate.finish_reason)
-            if finish not in ("FinishReason.STOP", "1", "STOP"):
+            if finish not in ("FinishReason.STOP", "1", "STOP", "FinishReason.MAX_TOKENS", "2", "MAX_TOKENS"):
                 print(f"   ⚠  Gemini blocked — finish_reason={finish}  "
                       f"safety={candidate.safety_ratings} (attempt {attempt + 1}/3)")
                 time.sleep(2 ** attempt)
