@@ -35,7 +35,6 @@ load_dotenv()
 # Configuration
 # ──────────────────────────────────────────────
 
-ZERO_SHOT_MODELS = ["gemini", "llama3-70b", "mixtral-8x7b"]
 N_ATTEMPTS_ZERO_SHOT = 10   # per prompt per model
 N_ATTEMPTS_AGENTIC   = 1    # ReAct is expensive; 1 run per prompt
 
@@ -84,6 +83,7 @@ def _metrics_row(
 def run_zero_shot(
     samples: list[dict],
     api_keys: dict,
+    models: list[str],
     n_attempts: int = N_ATTEMPTS_ZERO_SHOT,
 ) -> list[dict]:
     """
@@ -92,7 +92,7 @@ def run_zero_shot(
     """
     rows: list[dict] = []
 
-    for model in ZERO_SHOT_MODELS:
+    for model in models:
         print(f"\n{'='*60}")
         print(f"  Zero-Shot: {model}  ({n_attempts} attempts/prompt)")
         print(f"{'='*60}")
@@ -120,16 +120,17 @@ def run_zero_shot(
 def run_agentic(
     samples: list[dict],
     api_keys: dict,
+    models: list[str],
     n_attempts: int = N_ATTEMPTS_AGENTIC,
 ) -> list[dict]:
     """
     Evaluate every sample through the ReAct multi-agent pipeline.
-    Runs for every model in ZERO_SHOT_MODELS.
+    Runs for every provided model.
     Returns a flat list of metric row dicts.
     """
     rows: list[dict] = []
 
-    for model in ZERO_SHOT_MODELS:
+    for model in models:
         print(f"\n{'='*60}")
         print(f"  Agentic ReAct: {model}  (max {n_attempts} iterations / prompt)")
         print(f"{'='*60}")
@@ -249,6 +250,12 @@ def main() -> None:
     parser.add_argument("--max_samples", type=int, default=None,      help="Limit samples (useful for quick dev runs)")
     parser.add_argument("--skip_zero_shot",  action="store_true",     help="Skip zero-shot phase")
     parser.add_argument("--skip_agentic",    action="store_true",     help="Skip agentic phase")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["llama3-70b", "mixtral-8x7b"],
+        help="List of models to benchmark (e.g. gemini llama3-70b mixtral-8x7b)",
+    )
     parser.add_argument("--gemini_api_key",  default=os.getenv("GEMINI_API_KEY"))
     parser.add_argument("--nvidia_api_key",  default=os.getenv("NVIDIA_NIM_API_KEY"))
     args = parser.parse_args()
@@ -270,12 +277,12 @@ def main() -> None:
 
     # Phase 4: Zero-shot
     if not args.skip_zero_shot:
-        zs_rows = run_zero_shot(samples, api_keys)
+        zs_rows = run_zero_shot(samples, api_keys, args.models)
         all_rows.extend(zs_rows)
 
     # Phase 5+6: Agentic
     if not args.skip_agentic:
-        ag_rows = run_agentic(samples, api_keys)
+        ag_rows = run_agentic(samples, api_keys, args.models)
         all_rows.extend(ag_rows)
 
     # Write outputs
