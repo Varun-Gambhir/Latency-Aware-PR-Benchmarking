@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
 import google.generativeai as genai
 from openai import OpenAI               # used for NVIDIA NIM (OpenAI-compatible API)
 from dotenv import load_dotenv
@@ -119,7 +120,13 @@ def _call_nim(
     temperature: float = 0.2,
 ) -> str:
     key = api_key or os.getenv("NVIDIA_NIM_API_KEY", "")
-    client = OpenAI(base_url=NVIDIA_NIM_BASE_URL, api_key=key)
+    # Passing an explicit http_client bypasses the openai SDK's internal
+    # proxy-detection code that breaks on newer httpx versions (>=0.28).
+    client = OpenAI(
+        base_url=NVIDIA_NIM_BASE_URL,
+        api_key=key,
+        http_client=httpx.Client(),
+    )
     model_id = NIM_MODELS.get(model_key, model_key)
     try:
         completion = client.chat.completions.create(

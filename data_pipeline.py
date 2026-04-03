@@ -274,7 +274,8 @@ class BenchmarkSample:
     pr_number: int
     raw_title: str
     clean_prompt: str
-    reference_code: str          # unified diff from the PR
+    reference_code: str          # added lines only — plain C++ (used by metrics)
+    raw_diff: str                # full unified diff patch (for human inspection)
     pr_url: str
 
 
@@ -288,26 +289,46 @@ def _pr_matches_keywords(pr_body: str, title: str) -> bool:
     return any(kw.lower() in text for kw in HFT_KEYWORDS)
 
 
-def _extract_diff(pr) -> str:
+def _diff_to_reference_code(patch: str) -> str:
     """
-    Pull the unified diff for a PR.
-    Focuses on .cpp / .h / .hpp files and caps at 4 000 chars to
-    stay within LLM context limits.
+    Extract only the added lines from a unified diff patch,
+    stripping the leading '+' so the result is plain C++ code.
+    Skips diff headers (lines starting with '@@', '---', '+++').
+    This is what the model should reproduce — not the diff format itself.
     """
-    diff_parts: list[str] = []
+    lines = []
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            lines.append(line[1:])   # strip the leading '+'
+    return "\n".join(lines)
+
+
+def _extract_diff(pr) -> tuple[str, str]:
+    """
+    Pull the unified diff for a PR and return TWO strings:
+      - raw_diff:        the full patch (for context / human inspection)
+      - reference_code:  only the added lines stripped of diff markers
+                         (used as the ground-truth for metric comparison)
+
+    Focuses on .cpp / .h / .hpp files, caps each at 4 000 chars.
+    """
+    raw_parts: list[str] = []
+    ref_parts: list[str] = []
     try:
         files = list(pr.get_files())
     except GithubException:
-        return ""
+        return "", ""
 
     for f in files:
         if not any(f.filename.endswith(ext) for ext in (".cpp", ".cc", ".h", ".hpp", ".cxx")):
             continue
         if f.patch:
-            diff_parts.append(f"// File: {f.filename}\n{f.patch}")
+            raw_parts.append(f"// File: {f.filename}\n{f.patch}")
+            ref_parts.append(f"// File: {f.filename}\n{_diff_to_reference_code(f.patch)}")
 
-    combined = "\n\n".join(diff_parts)
-    return combined[:4000] if combined else ""
+    raw  = "\n\n".join(raw_parts)[:4000]
+    ref  = "\n\n".join(ref_parts)[:4000]
+    return raw, ref
 
 
 def _append_raw_pr(record: dict, path: str) -> None:
@@ -433,8 +454,8 @@ def collect_prs(
             if not _pr_matches_keywords(pr.body or "", pr.title):
                 continue
 
-            diff = _extract_diff(pr)
-            if not diff:
+            raw_diff, reference_code = _extract_diff(pr)
+            if not reference_code:
                 continue
 
             record = {
@@ -442,7 +463,8 @@ def collect_prs(
                 "pr_number": pr.number,
                 "raw_title": pr.title,
                 "raw_body": (pr.body or "")[:2000],
-                "diff": diff,
+                "raw_diff": raw_diff,
+                "reference_code": reference_code,
                 "pr_url": pr.html_url,
             }
 
@@ -466,7 +488,7 @@ def collect_prs(
 def _init_gemini(api_key: str) -> genai.GenerativeModel:
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
+        model_name="gemini-2.0-flash",
         system_instruction=CLEANER_SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(temperature=0.2, max_output_tokens=200),
     )
@@ -567,7 +589,8 @@ def refine_dataset(
             pr_number=raw["pr_number"],
             raw_title=raw["raw_title"],
             clean_prompt=clean,
-            reference_code=raw["diff"],
+            reference_code=raw["reference_code"],
+            raw_diff=raw.get("raw_diff", ""),
             pr_url=raw["pr_url"],
         )
         # ── Write immediately — crash-safe ──────────────────────────────
