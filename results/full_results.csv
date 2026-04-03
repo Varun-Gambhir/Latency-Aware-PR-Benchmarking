@@ -1,0 +1,4 @@
+id,model,condition,pass_at_1,pass_at_5,mean_ext_bleu,max_ext_bleu
+HFT-0000,gemini,agentic_react,0.0,0.0,0.0167,0.0167
+HFT-0000,llama3-70b,agentic_react,0.0,0.0,0.136,0.136
+HFT-0000,mixtral-8x7b,agentic_react,0.0,0.0,0.1187,0.1187

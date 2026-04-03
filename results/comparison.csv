@@ -1,0 +1,4 @@
+model,condition,n_samples,mean_pass@1,mean_pass@5,mean_ext_bleu
+gemini,agentic_react,1,0.0,0.0,0.0167
+llama3-70b,agentic_react,1,0.0,0.0,0.136
+mixtral-8x7b,agentic_react,1,0.0,0.0,0.1187
