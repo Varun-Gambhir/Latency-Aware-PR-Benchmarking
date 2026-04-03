@@ -205,7 +205,8 @@ def zero_shot_generate(
                 api_key=api_keys.get("gemini"),
                 temperature=0.7,   # slight diversity for Pass@k
             )
-        elif model_name in NIM_MODELS:
+        else:
+            # Treat any other model_name as a NIM model ID (it resolves via the NIM_MODELS dict or directly)
             code = _call_nim(
                 PROGRAMMER_SYSTEM,
                 prompt,
@@ -213,8 +214,6 @@ def zero_shot_generate(
                 api_key=api_keys.get("nvidia"),
                 temperature=0.7,
             )
-        else:
-            raise ValueError(f"Unknown model: {model_name}. Choose from: gemini, {list(NIM_MODELS)}")
 
         generations.append(code)
         time.sleep(0.3)   # basic rate-limit guard
