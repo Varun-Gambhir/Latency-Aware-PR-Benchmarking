@@ -134,6 +134,10 @@ def _call_gemini(
                       f"safety={candidate.safety_ratings} (attempt {attempt + 1}/3)")
                 time.sleep(2 ** attempt)
                 continue
+            if not candidate.content or not candidate.content.parts:
+                print(f"   ⚠  Gemini returned empty content parts (attempt {attempt + 1}/3)")
+                time.sleep(2 ** attempt)
+                continue
             return candidate.content.parts[0].text.strip()
         except Exception as exc:
             print(f"   ⚠  Gemini call failed (attempt {attempt + 1}/3): {exc}")
