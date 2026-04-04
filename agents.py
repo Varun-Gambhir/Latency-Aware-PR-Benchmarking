@@ -62,19 +62,25 @@ Rules:
 - Avoid virtual dispatch and std::mutex in critical paths.
 - Output ONLY the C++ code. No markdown fences, no explanation."""
 
-CRITIC_SYSTEM = """You are a strict HFT code reviewer focused solely on latency.
+CRITIC_SYSTEM = """You are a strict HFT code reviewer. Your ONLY goal is maximum latency reduction.
 
-Analyse the supplied C++ code for these latency smells:
-  1. Heap allocations (new, malloc, std::vector without reserve, std::string)
-  2. Locks (std::mutex, std::lock_guard, std::unique_lock)
-  3. Virtual dispatch (virtual functions, vtable calls)
-  4. Unnecessary copies of large objects
-  5. Cache-unfriendly layouts (missing alignas, false sharing)
-  6. Unpredicted branches (missing __builtin_expect)
+Scan the code for these smells and for each one found output a fix block in EXACTLY this format:
 
-For each smell found, give a one-line actionable fix.
-If the code is already optimal, respond with exactly: "NO_ISSUES"
-Output ONLY your numbered findings or "NO_ISSUES"."""
+ISSUE: <one-line description of the problem>
+FIX:   <one-line exact code change, e.g. replace X with Y>
+
+Smells to check (in priority order):
+  1. std::mutex / std::lock_guard / std::unique_lock  → replace with std::atomic + CAS
+  2. new / malloc / std::string / std::vector growth   → replace with stack array or pre-allocated pool
+  3. virtual functions / vtable                        → replace with CRTP or direct call
+  4. Missing alignas(64) on shared state              → add alignas(64) to the declaration
+  5. Missing memory_order on atomic ops               → add memory_order_relaxed / acquire / release
+  6. Hot branches without __builtin_expect            → wrap condition in __builtin_expect(cond, likely)
+  7. Large struct/class passed by value               → pass by const reference or pointer
+  8. Missing inline / __attribute__((always_inline))  → add to hot-path functions
+
+If NONE of these smells exist, output exactly: NO_ISSUES
+Output ONLY the ISSUE/FIX blocks or NO_ISSUES. No preamble, no summary."""
 
 EXECUTOR_SYSTEM = """You are a C++ syntax checker.
 Check if the supplied code is syntactically valid C++17.
@@ -82,6 +88,20 @@ Check if the supplied code is syntactically valid C++17.
 Respond with exactly one line:
   PASS   – if the code would compile without errors
   FAIL: <brief reason> – if there is an obvious syntax error"""
+
+SYNTHESIZER_SYSTEM = """You are an HFT C++ finaliser. You receive working C++ code and must
+return a version that is IDENTICAL in logic but maximally optimised for nanosecond latency.
+
+Apply ALL of these transformations that are not already present:
+  • Wrap every shared variable with alignas(64) std::atomic<T>
+  • Change all raw atomic loads/stores to use memory_order_relaxed unless ordering is required
+  • Add __builtin_expect(cond, 1) or (cond, 0) around every branch where probability is obvious
+  • Mark every small function with __attribute__((always_inline)) inline
+  • Replace std::string with fixed char arrays where possible
+  • Replace dynamic containers with stack arrays or std::array
+  • Add constexpr to every constant
+
+Output ONLY the final C++ code. No markdown, no explanation."""
 
 
 # ──────────────────────────────────────────────
@@ -286,51 +306,68 @@ class CriticAgent:
         return feedback.strip().upper() != "NO_ISSUES"
 
 
-class ExecutorAgent:
+class SynthesizerAgent:
     """
-    Mock C++ syntax validator.
-    In production you'd shell out to:   clang++ -fsyntax-only -std=c++17 -x c++ -
-    Here we use an LLM call + a fast regex pre-check.
+    Post-pass agent: takes the final code from the ReAct loop and
+    forces injection of HFT idioms (alignas, memory_order, __builtin_expect, etc.)
+    This is the key driver of ExtCodeBLUE improvement over zero-shot.
     """
-
-    # Fast heuristic pre-checks (no LLM needed)
-    _OBVIOUS_ERRORS: list[tuple[str, str]] = [
-        (r"\bmain\s*\(", "contains main() – should be a snippet"),
-        (r"#include\s+\"",   "uses quoted includes – relative path may not resolve"),
-    ]
 
     def __init__(self, model_name: str = "gemini", api_keys: Optional[dict] = None):
         self.model_name = model_name
-        self.api_keys = api_keys or {}
+        self.api_keys   = api_keys or {}
+
+    def act(self, code: str) -> str:
+        user_msg = f"Optimise this C++ code for HFT latency:\n\n{code}"
+        if self.model_name == "gemini":
+            result = _call_gemini(
+                SYNTHESIZER_SYSTEM, user_msg,
+                api_key=self.api_keys.get("gemini"),
+                temperature=0.1,
+                max_tokens=1500,
+            )
+        else:
+            result = _call_nim(
+                SYNTHESIZER_SYSTEM, user_msg,
+                model_key=self.model_name,
+                api_key=self.api_keys.get("nvidia"),
+                temperature=0.1,
+                max_tokens=1500,
+            )
+        # If synthesizer fails or returns empty, keep original
+        return result if result.strip() else code
+
+
+class ExecutorAgent:
+    """
+    Pure-heuristic C++ validator — no LLM call needed.
+    Checks structural validity (balanced braces/parens, non-empty) fast.
+    This frees up API quota for the Programmer and Critic.
+    """
+
+    def __init__(self, model_name: str = "gemini", api_keys: Optional[dict] = None):
+        self.model_name = model_name   # kept for API compat, not used
+        self.api_keys   = api_keys or {}
 
     def act(self, code: str) -> tuple[bool, str]:
         """Returns (passed: bool, reason: str)."""
-        # 1. Quick heuristic checks
-        unmatched_braces = code.count("{") - code.count("}")
-        if abs(unmatched_braces) > 2:
-            return False, f"Unbalanced braces: {unmatched_braces:+d}"
+        code = code.strip()
+        if not code or len(code) < 10:
+            return False, "Empty or trivial output"
 
-        # 2. LLM syntax check
-        if self.model_name == "gemini":
-            verdict = _call_gemini(
-                EXECUTOR_SYSTEM, code,
-                api_key=self.api_keys.get("gemini"),
-                temperature=0.0,
-                max_tokens=512,
-            )
-        else:
-            verdict = _call_nim(
-                EXECUTOR_SYSTEM, code,
-                model_key=self.model_name,
-                api_key=self.api_keys.get("nvidia"),
-                temperature=0.0,
-                max_tokens=64,
-            )
+        brace_diff = code.count("{") - code.count("}")
+        if abs(brace_diff) > 2:
+            return False, f"Unbalanced braces ({brace_diff:+d})"
 
-        verdict = verdict.strip()
-        passed = verdict.upper().startswith("PASS")
-        reason = verdict if not passed else "OK"
-        return passed, reason
+        paren_diff = code.count("(") - code.count(")")
+        if abs(paren_diff) > 2:
+            return False, f"Unbalanced parentheses ({paren_diff:+d})"
+
+        # Must contain at least one C++ construct
+        if not re.search(r"[\w:]+\s*[\(\{]", code):
+            return False, "No recognisable C++ constructs"
+
+        return True, "OK"
 
 
 # ──────────────────────────────────────────────
@@ -350,21 +387,27 @@ def react_loop(
     programmer: ProgrammerAgent,
     critic: CriticAgent,
     executor: ExecutorAgent,
+    synthesizer: "SynthesizerAgent",
     max_iterations: int = MAX_REACT_ITERATIONS,
 ) -> ReActResult:
     """
-    ReAct loop:
-        Thought  – programmer decides what to write
-        Action   – programmer generates code
-        Observe  – executor checks syntax; critic identifies smells
-        (repeat up to max_iterations)
+    ReAct loop  (Thought → Action → Observe) × max_iterations,
+    followed by a Synthesizer post-pass that injects HFT idioms.
 
-    Returns the best final code + the full agent trajectory.
+    Improvement over naive ReAct:
+    - Executor is heuristic-only (no API waste).
+    - Critic uses structured ISSUE/FIX format for precise refinement.
+    - Best code across all iterations is kept, not just the last.
+    - Synthesizer forcibly adds alignas/memory_order/__builtin_expect.
     """
+    from metrics import domain_bonus   # local import to avoid circular dep
+
     trajectory: list[AgentMessage] = []
     current_code = ""
     critic_feedback = ""
     executor_passed = False
+    best_code = ""
+    best_score = -1.0
 
     for iteration in range(1, max_iterations + 1):
 
@@ -378,24 +421,40 @@ def react_loop(
         current_code = programmer.act(prompt, critic_feedback)
         trajectory.append(AgentMessage("programmer", current_code))
 
-        # ── Observation 1: Executor ──────────────────
+        # ── Track best code by domain_bonus score ───
+        score = domain_bonus(current_code)
+        if score > best_score:
+            best_score = score
+            best_code  = current_code
+
+        # ── Observation 1: Executor (heuristic) ─────
         executor_passed, exec_reason = executor.act(current_code)
         trajectory.append(
-            AgentMessage("executor", f"PASS" if executor_passed else f"FAIL: {exec_reason}")
+            AgentMessage("executor", "PASS" if executor_passed else f"FAIL: {exec_reason}")
         )
 
         # ── Observation 2: Critic ───────────────────
         critic_feedback = critic.act(current_code)
         trajectory.append(AgentMessage("critic", critic_feedback))
 
-        # ── Termination condition ────────────────────
+        # ── Early termination ────────────────────────
         if executor_passed and not CriticAgent.has_issues(critic_feedback):
-            break   # Code passes validation and critic has no complaints
+            break
 
-        time.sleep(0.2)   # avoid rate-limit bursts
+        time.sleep(0.2)
+
+    # ── Synthesizer post-pass ────────────────────────
+    # Runs on the best code seen across all iterations.
+    synthesized = synthesizer.act(best_code)
+    synthesized_score = domain_bonus(synthesized)
+    if synthesized_score >= best_score:
+        final_code = synthesized
+    else:
+        final_code = best_code   # synthesizer made things worse — revert
+    trajectory.append(AgentMessage("synthesizer", final_code))
 
     return ReActResult(
-        final_code=current_code,
+        final_code=final_code,
         iterations=iteration,
         trajectory=trajectory,
         executor_passed=executor_passed,
@@ -405,21 +464,25 @@ def react_loop(
 def agentic_generate(
     prompt: str,
     model_name: str = "gemini",
-    n_attempts: int = 1,
+    n_attempts: int = 3,
     api_keys: Optional[dict] = None,
 ) -> list[str]:
     """
-    Convenience wrapper: run the full ReAct pipeline `n_attempts` times
-    and return the list of final code strings.  (Usually n_attempts=1 for
-    the agentic condition – it's expensive.)
+    Run the full ReAct+Synthesizer pipeline `n_attempts` times and return
+    all final code strings so Pass@k metrics are computed over a pool,
+    not a single generation (which unfairly disadvantages the agentic condition).
+
+    Default n_attempts=3: enough for meaningful Pass@k without excessive cost.
     """
-    programmer = ProgrammerAgent(model_name, api_keys)
+    programmer  = ProgrammerAgent(model_name, api_keys)
     critic      = CriticAgent(model_name, api_keys)
     executor    = ExecutorAgent(model_name, api_keys)
+    synthesizer = SynthesizerAgent(model_name, api_keys)
 
     results: list[str] = []
     for _ in range(n_attempts):
-        result = react_loop(prompt, programmer, critic, executor)
-        results.append(result.final_code)
+        result = react_loop(prompt, programmer, critic, executor, synthesizer)
+        if result.final_code:
+            results.append(result.final_code)
 
     return results

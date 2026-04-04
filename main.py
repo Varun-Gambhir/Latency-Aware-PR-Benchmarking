@@ -36,7 +36,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 
 N_ATTEMPTS_ZERO_SHOT = 10   # per prompt per model
-N_ATTEMPTS_AGENTIC   = 1    # ReAct is expensive; 1 run per prompt
+N_ATTEMPTS_AGENTIC   = 3    # 3 runs → pool for Pass@k; fairer vs zero-shot n=10
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -132,7 +132,7 @@ def run_agentic(
 
     for model in models:
         print(f"\n{'='*60}")
-        print(f"  Agentic ReAct: {model}  (max {n_attempts} iterations / prompt)")
+        print(f"  Agentic ReAct: {model}  ({n_attempts} run(s) × 3 ReAct iters + Synthesizer)")
         print(f"{'='*60}")
 
         for sample in tqdm(samples, desc=f"agentic-{model}", unit="prompt"):
