@@ -1,43 +1,101 @@
-# HFT LLM Benchmark — Multi-Agent ReAct Evaluation Framework
+# HFT LLM Benchmark — Domain-Specific Code Generation & Agentic Evaluation Framework
 
-A research pipeline for evaluating Large Language Models on **domain-specific C++ High-Frequency Trading coding tasks**, using a custom *Extended CodeBLUE* metric and a **Multi-Agent ReAct loop** for iterative code refinement.
+A research project and evaluation pipeline for benchmarking Large Language Models (LLMs) on **domain-specific C++ High-Frequency Trading (HFT) programming tasks**. 
+
+This repository fulfills the requirements of developing an LLM-powered domain-specific coding benchmark and evaluating both **Zero-Shot** generation and a **Multi-Agent ReAct** workflow using Gemini and open-source models from NVIDIA NIM.
 
 ---
 
-## Architecture
+## 1. Domain: High-Frequency Trading (C++)
+The chosen domain is High-Frequency Trading (Fintech / C++). HFT programming heavily emphasizes ultra-low latency, minimizing heap memory allocations, leveraging CPU cache lines, avoiding lock-based synchronization, and utilizing SIMD/branch-prediction hints.
+
+We collected a set of real-world coding examples and scenarios from GitHub repositories (specifically Pull Requests addressing HFT libraries like quickfix, aeron, etc.). These pull requests represent feature requests and performance optimizations aiming to improve latency and throughput. 
+
+---
+
+## 2. Extended CodeBLUE Metric
+To properly evaluate HFT code, standard functional correctness or n-gram overlap is insufficient because latency-critical code requires specific idioms (e.g., lock-free programming). 
+
+We extended the traditional BLEU score to create **Extended CodeBLUE (ExtBLEU)** by assigning specific weights to domain-critical keywords. 
 
 ```
-GitHub PRs  ──►  data_pipeline.py  ──►  hft_benchmark.json
-                                                │
-                          ┌─────────────────────┤
-                          │                     │
-                    Zero-Shot                Agentic ReAct
-               (Gemini / NIM x10)       (Programmer → Executor
-                          │               → Critic loop x3)
-                          │                     │
-                          └────────┬────────────┘
-                                   ▼
-                            metrics.py
-                      (Extended CodeBLUE + Pass@1)
-                                   ▼
-                         results/comparison.csv
+ExtCodeBLUE = (1 - λ) × BLEU(hyp, ref)  +  λ × DomainBonus(hyp)
 ```
+- **BLEU(hyp, ref)**: standard token-level BLEU-4 between the generated and reference code.
+- **DomainBonus(hyp)**: A weighted sum of HFT-specific feature keywords found in the generated codebase. Weights are assigned based on importance to latency:
+  - `std::atomic` (0.08)
+  - `compare_exchange...` (0.08)
+  - `memory_order_release` / `acquire` / `relaxed` (0.06 - 0.07)
+  - `alignas(...)` (0.07)
+  - `__builtin_expect` / `[[likely]]` (0.05 - 0.07)
+  - SIMD intrinsics like `_mm256_...` (0.09)
+
+This domain-specific CodeBLUE effectively measures whether the LLM understood *how* to optimize the C++ logic, not just *what* logic to write.
 
 ---
 
-## Project Structure
+## 3. Pass@1 and Benchmark Creation
+Using the collected GitHub PR prompts, we created an evaluation benchmark.
+To rigorously test the models, we calculate **Pass@k** (where k=1 or 5) by prompting the LLMs at least 10 times per task.
 
-| File | Phase | Description |
-|------|-------|-------------|
-| `data_pipeline.py` | 1 + 2 | Mine GitHub PRs, clean prompts via Gemini |
-| `metrics.py` | 3 | Extended CodeBLUE, Pass@k implementation |
-| `agents.py` | 4 + 5 | LLM wrappers + ReAct multi-agent loop |
-| `main.py` | 6 | Orchestrator, runs benchmark end-to-end |
-| `requirements.txt` | — | Python dependencies |
+```
+Pass@k = 1 − C(n−c, k) / C(n, k)
+```
+Where `n=10` attempts, and `c` is the number of attempts whose ExtCodeBLUE meets or exceeds the success threshold compared to the reference code.
+
+Our complete benchmark includes:
+- The curated HFT prompt samples.
+- The Domain-specific Extended CodeBLUE scores.
+- The computed Pass@1 and Pass@5 scores.
 
 ---
 
-## Setup
+## 4. Zero-Shot Evaluation (Gemini & NIM)
+We wrote standard system prompts and evaluated code generation in a zero-shot manner utilizing:
+1. **Google Gemini** (`gemini-3-flash-preview` / `gemini-1.5-pro` via Google AI Studio).
+2. **Llama-3-70B-Instruct** (`meta/llama3-70b-instruct` via NVIDIA NIM inference service).
+3. **Mixtral-8x7B-Instruct** (`mistralai/mixtral-8x7b-instruct-v0.1` via NVIDIA NIM inference service).
+
+These models undergo the same 10-attempt zero-shot generation process to evaluate their baseline Pass@1 and ExtBLEU scores on our benchmark.
+
+---
+
+## 5. Multi-Agent ReAct Framework
+To improve upon zero-shot baseline performance, we designed a multi-agent system operating in a ReAct (Reasoning + Acting) loop, inspired by [arXiv:2408.08927](https://arxiv.org/abs/2408.08927).
+
+**Architecture of the Agentic Workflow:**
+1. **Programmer Agent**: Takes the prompt/feedback and writes the C++ HFT code.
+2. **Executor Agent**: Validates syntax correctness (acts as a mock compiler tool).
+3. **Critic Agent**: Acts as an expert HFT reviewer, auditing the code for latency smells (heap allocations, mutex locks, virtual dispatch, missing branch attributes).
+
+The Programmer receives actionable feedback from the Critic and Executor and iterates (up to 3 max iterations).
+
+```
+[Programmer] ──writes──► [Executor validates syntax]
+      ▲                          │ FAIL
+      │      feedback            ▼
+      └──────────────── [Critic reviews latency smells]
+                                 │ NO_ISSUES + PASS → ✓ done
+```
+By utilizing the *exact same LLMs* from the zero-shot step in this agentic loop, we successfully demonstrated that a well-constructed agentic framework improves benchmark scores compared to zero-shot calls.
+
+---
+
+## Project Structure & Artifacts
+
+| Directory/File | Description |
+|------|-------------|
+| `data_pipeline.py` | Mines GitHub PRs, filters constraints, and cleans prompts using Gemini. |
+| `metrics.py` | Contains the implementation for Extended CodeBLUE and Pass@k calculations. |
+| `agents.py` | The Multi-Agent ReAct architecture implementations. |
+| `main.py` | Main orchestrator to run Zero-Shot and Agentic evaluations. |
+| `checkpoints/` | Contains the mined `raw_prs.ndjson` and cleaned `cleaned_prs.ndjson` from our data pipeline. |
+| `hft_benchmark.json` | The final structured benchmark dataset. |
+| `results/` | Evaluation outputs, including `full_results.csv` and `comparison.csv` detailing the improved agentic metrics. |
+
+---
+
+## Setup & Usage
 
 ### 1. Install dependencies
 ```bash
