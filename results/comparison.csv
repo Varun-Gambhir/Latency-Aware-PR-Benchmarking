@@ -1,0 +1,5 @@
+model,condition,n_samples,mean_pass@1,mean_pass@5,mean_ext_bleu
+llama3-70b,zero_shot,206,0.1612,0.3348,0.1158
+mixtral-8x7b,zero_shot,206,0.1505,0.3443,0.1192
+llama3-70b,agentic_react,206,0.3091,0.2233,0.1467
+mixtral-8x7b,agentic_react,206,0.2735,0.1796,0.146
